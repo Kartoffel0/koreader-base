@@ -1,4 +1,33 @@
-diff --git a/source/html/html-imp.h b/html-imp.h
+diff --git a/include/mupdf/fitz/device.h b/include/mupdf/fitz/device.h
+index eb60b69..f15afef 100644
+--- a/include/mupdf/fitz/device.h
++++ b/include/mupdf/fitz/device.h
+@@ -430,7 +430,8 @@ enum
+ 	/* Hints */
+ 	FZ_DONT_INTERPOLATE_IMAGES = 1,
+ 	FZ_NO_CACHE = 2,
+-	FZ_DONT_DECODE_IMAGES = 4
++	FZ_DONT_DECODE_IMAGES = 4,
++	FZ_IGNORE_RUBY_ANNOTATIONS = 8
+ };
+ 
+ /**
+diff --git a/source/fitz/stext-device.c b/source/fitz/stext-device.c
+index df98a5e..f35f6b3 100644
+--- a/source/fitz/stext-device.c
++++ b/source/fitz/stext-device.c
+@@ -2936,6 +2936,10 @@ fz_new_stext_device_for_page(fz_context *ctx, fz_stext_page *page, const fz_stex
+ 	if ((dev->flags & FZ_STEXT_PRESERVE_IMAGES) == 0 && (dev->opts.flags & FZ_STEXT_IGNORE_ACTUALTEXT) != 0)
+ 		dev->super.hints |= FZ_DONT_DECODE_IMAGES;
+ 
++	/* Ruby annotations are pronunciation, not text: keep them out of the
++	 * extracted text. */
++	dev->super.hints |= FZ_IGNORE_RUBY_ANNOTATIONS;
++
+ 	dev->rect_max = 0;
+ 	dev->rect_len = 0;
+ 	dev->rects = NULL;
+diff --git a/source/html/html-imp.h b/source/html/html-imp.h
 index c5338fa..f9400aa 100644
 --- a/source/html/html-imp.h
 +++ b/source/html/html-imp.h
@@ -20,19 +49,18 @@ index c5338fa..f9400aa 100644
  };
  
  struct fz_html_flow_s
-diff --git a/source/html/html-layout.c b/html-layout.c
-index 7a0a673..1804879 100644
+diff --git a/source/html/html-layout.c b/source/html/html-layout.c
+index 7a0a673..1ec5b05 100644
 --- a/source/html/html-layout.c
 +++ b/source/html/html-layout.c
-@@ -375,6 +375,16 @@ static float measure_line(fz_html_flow *node, fz_html_flow *end, float *baseline
+@@ -375,6 +375,15 @@ static float measure_line(fz_html_flow *node, fz_html_flow *end, float *baseline
  			if (node->h > max_a)
  				max_a = node->h;
  		}
 +		else if (node->type == FLOW_RUBY)
 +		{
-+			/* The ruby box's baseline offset holds the distance from the
-+			 * top of the ruby unit to the base text baseline; the rest of
-+			 * the unit's height is below that baseline. */
++			/* The box's baseline offset is the distance from the unit top
++			 * to the base text baseline; the rest is below it. */
 +			float a = -node->box->s.layout.baseline;
 +			float d = node->h - a;
 +			if (a > max_a) max_a = a;
@@ -41,7 +69,7 @@ index 7a0a673..1804879 100644
  		else if (node->type != FLOW_SBREAK && node->type != FLOW_BREAK && node->type != FLOW_ANCHOR)
  		{
  			// Clamp ascender/descender to line-height size.
-@@ -393,6 +403,188 @@ static float measure_line(fz_html_flow *node, fz_html_flow *end, float *baseline
+@@ -393,6 +402,175 @@ static float measure_line(fz_html_flow *node, fz_html_flow *end, float *baseline
  	return h;
  }
  
@@ -59,21 +87,15 @@ index 7a0a673..1804879 100644
 +	return 0;
 +}
 +
-+/* Lay out the contents of a ruby box: pair each run of annotation words with
-+ * the preceding run of base words, and place it centered above that base
-+ * text. A base segment wider than its annotation just has the annotation
-+ * centered over it; an annotation wider than its base widens the segment so
-+ * both fit.
++/* Lay out a ruby box: pair each run of annotation words with the preceding
++ * run of base words, centered above it. An annotation wider than its base
++ * widens the segment so both fit.
 + *
-+ * The positions stored in the inner flows are relative to the ruby box
-+ * origin (top of the annotation glyphs), which is set from the FLOW_RUBY
-+ * node's x/y during line layout. The flow node's w and h are set here, and
-+ * the ruby box's layout baseline is repurposed to hold the (negative)
-+ * offset from the node's y to the base text baseline.
-+ *
-+ * Glyph positioning uses the fonts' real ascender/descender metrics rather
-+ * than em-box fractions, and the same gap is kept above and below the base
-+ * text so consecutive lines pack evenly. */
++ * Inner flow positions are relative to the top of the ruby unit (the
++ * FLOW_RUBY node's origin). The node's w and h are set here, and the box's
++ * layout baseline stores the (negative) offset from the node's origin to
++ * the base text baseline. Uses the fonts' real ascender/descender metrics
++ * so glyphs neither overlap nor float. */
 +static void layout_ruby(fz_context *ctx, fz_html_flow *node)
 +{
 +	fz_html_box *ruby = node->box;
@@ -82,11 +104,6 @@ index 7a0a673..1804879 100644
 +	fz_font *ann_font = NULL;
 +	float base_em = ruby->s.layout.em;
 +	float ann_em = base_em * 0.5f;
-+	/* Gap below the annotation (currently zero: the annotation sits flush
-+	 * with the base text). Nothing extra below the base text, so
-+	 * consecutive lines pack tightly; the fonts' real metrics leave a
-+	 * similarly small gap above the next line's annotation. */
-+	float gap = 0;
 +	float base_asc = 0.8f, base_desc = 0.2f;
 +	float ann_asc = 0.8f, ann_desc = 0.2f;
 +	float base_baseline, ann_baseline;
@@ -114,8 +131,7 @@ index 7a0a673..1804879 100644
 +	if (base_font == NULL)
 +		base_font = ruby->style->font;
 +
-+	/* Use the real font metrics so fonts with large ascenders/descenders
-+	 * (e.g. CJK fonts) neither overlap nor leave a visual hole. */
++	/* Use the real font metrics. */
 +	if (base_font)
 +	{
 +		base_asc = fz_font_ascender(ctx, base_font);
@@ -127,12 +143,11 @@ index 7a0a673..1804879 100644
 +		ann_desc = -fz_font_descender(ctx, ann_font);
 +	}
 +
-+	/* The ruby unit: annotation glyphs at the top, base text below them,
-+	 * with only the small gap in between. */
++	/* Annotation at the top, base text below it. */
 +	if (has_ann)
 +	{
 +		ann_baseline = ann_asc * ann_em;
-+		base_baseline = (ann_asc + ann_desc) * ann_em + gap + base_asc * base_em;
++		base_baseline = (ann_asc + ann_desc) * ann_em + base_asc * base_em;
 +	}
 +	else
 +	{
@@ -216,8 +231,8 @@ index 7a0a673..1804879 100644
 +	node->w = x;
 +	if (has_ann)
 +	{
-+		/* annotation height + gap + base text height. */
-+		node->h = (ann_asc + ann_desc) * ann_em + gap
++		/* Annotation and base text heights. */
++		node->h = (ann_asc + ann_desc) * ann_em
 +			+ (base_asc + base_desc) * base_em;
 +	}
 +	else
@@ -230,7 +245,7 @@ index 7a0a673..1804879 100644
  static void layout_line(fz_context *ctx, float indent, float page_w, float line_w, int align, fz_html_flow *start, fz_html_flow *end, fz_html_box *box, float baseline, float line_h)
  {
  	float x = box->s.layout.x + indent;
-@@ -515,6 +707,8 @@ static void layout_line(fz_context *ctx, float indent, float page_w, float line_
+@@ -515,6 +693,8 @@ static void layout_line(fz_context *ctx, float indent, float page_w, float line_
  
  		if (node->type == FLOW_IMAGE)
  			node->y = y + baseline - node->h;
@@ -239,7 +254,7 @@ index 7a0a673..1804879 100644
  		else
  		{
  			node->y = y + baseline + va;
-@@ -927,6 +1121,10 @@ static void layout_flow(fz_context *ctx, layout_data *ld, fz_html_box *box, fz_h
+@@ -927,6 +1107,10 @@ static void layout_flow(fz_context *ctx, layout_data *ld, fz_html_box *box, fz_h
  		{
  			node->h = 0;
  		}
@@ -250,7 +265,7 @@ index 7a0a673..1804879 100644
  		else
  		{
  			/* Note: already measured width in layout_update_widths */
-@@ -2929,7 +3127,7 @@ static void layout_update_styles(fz_context *ctx, fz_html_box *box, fz_html_box
+@@ -2929,7 +3113,7 @@ static void layout_update_styles(fz_context *ctx, fz_html_box *box, fz_html_box
  		else
  			box->s.layout.baseline = top_baseline;
  
@@ -259,7 +274,7 @@ index 7a0a673..1804879 100644
  		{
  			float *margin = box->u.block.margin;
  			float *border = box->u.block.border;
-@@ -2990,6 +3188,18 @@ static void layout_update_widths(fz_context *ctx, fz_html_box *box, fz_html_box
+@@ -2990,6 +3174,18 @@ static void layout_update_widths(fz_context *ctx, fz_html_box *box, fz_html_box
  				}
  				else if (node->type == FLOW_WORD || node->type == FLOW_SPACE || node->type == FLOW_SHYPHEN)
  					measure_string_w(ctx, node, hb_buf);
@@ -278,20 +293,24 @@ index 7a0a673..1804879 100644
  			}
  		}
  
-@@ -3261,6 +3471,121 @@ unpack_color(const fz_css_color src)
+@@ -3261,6 +3457,125 @@ unpack_color(const fz_css_color src)
  	return dst;
  }
  
-+/* Draw the words inside a ruby box; dx/dy offset the inner flows' positions
-+ * (which are relative to the ruby unit) to absolute coordinates. */
++/* Draw the words inside a ruby box, offset by dx/dy to absolute coordinates. */
 +static void draw_ruby(fz_context *ctx, fz_html_box *ruby, fz_device *dev, fz_matrix ctm,
 +	hb_buffer_t *hb_buf, fz_html_flow *flow, float dx, float dy, float page_top)
 +{
++	int skip_annotations = (dev->hints & FZ_IGNORE_RUBY_ANNOTATIONS) != 0;
++
 +	for (; flow; flow = flow->next)
 +	{
 +		const fz_css_style *style = flow->box->style;
 +
 +		if (style->visibility != V_VISIBLE)
++			continue;
++
++		if (skip_annotations && flow_is_ruby_annotation(flow))
 +			continue;
 +
 +		if (flow->type == FLOW_RUBY)
@@ -400,7 +419,7 @@ index 7a0a673..1804879 100644
  static inline int
  color_eq(fz_css_color a, fz_css_color b)
  {
-@@ -3316,7 +3641,7 @@ static int draw_flow_box(fz_context *ctx, fz_html_box *box, float page_top, floa
+@@ -3316,7 +3631,7 @@ static int draw_flow_box(fz_context *ctx, fz_html_box *box, float page_top, floa
  				}
  			}
  
@@ -409,20 +428,41 @@ index 7a0a673..1804879 100644
  			{
  				if (node->y >= page_bot || node->y + node->h <= page_top)
  					continue;
-@@ -3496,6 +3821,12 @@ static int draw_flow_box(fz_context *ctx, fz_html_box *box, float page_top, floa
+@@ -3496,6 +3811,33 @@ static int draw_flow_box(fz_context *ctx, fz_html_box *box, float page_top, floa
  					y += y_advance * node_scale;
  				}
  			}
 +			else if (node->type == FLOW_RUBY)
 +			{
 +				if (style->visibility == V_VISIBLE)
++				{
++					/* Flush the pending words first, so the ruby text
++					 * is emitted after them and the text order stays
++					 * correct for text extraction. */
++					if (text)
++					{
++						if (prev_filling)
++						{
++							unpacked_color color = unpack_color(prev_fill_color);
++							fz_fill_text(ctx, dev, text, ctm, fz_device_rgb(ctx), color.rgb, color.a, fz_default_color_params);
++						}
++						if (prev_stroking)
++						{
++							unpacked_color color = unpack_color(prev_stroke_color);
++							ss->linewidth = prev_line_width;
++							fz_stroke_text(ctx, dev, text, ss, ctm, fz_device_rgb(ctx), color.rgb, color.a, fz_default_color_params);
++						}
++						fz_drop_text(ctx, text);
++						text = NULL;
++					}
 +					draw_ruby(ctx, node->box, dev, ctm, hb_buf,
 +						node->box->u.flow.head, node->x, node->y, page_top);
++				}
 +			}
  			else if (node->type == FLOW_IMAGE)
  			{
  				if (text)
-@@ -3884,6 +4215,9 @@ static int draw_box(fz_context *ctx, fz_html_box *box, float page_top, float pag
+@@ -3884,6 +4226,9 @@ static int draw_box(fz_context *ctx, fz_html_box *box, float page_top, float pag
  
  	switch (box->type)
  	{
@@ -432,7 +472,7 @@ index 7a0a673..1804879 100644
  	case BOX_TABLE_ROW:
  		if (restart && restart->end == box)
  			ret = 1;
-@@ -4617,6 +4951,25 @@ gather_text(fz_context *ctx, fz_html_box *box)
+@@ -4617,6 +4962,25 @@ gather_text(fz_context *ctx, fz_html_box *box)
  					text = fz_strdup(ctx, s);
  				}
  			}
@@ -458,8 +498,8 @@ index 7a0a673..1804879 100644
  			else if (node->type == FLOW_IMAGE)
  			{
  			}
-diff --git a/source/html/html-parse.c b/html-parse.c
-index de816eb..06d3d23 100644
+diff --git a/source/html/html-parse.c b/source/html/html-parse.c
+index de816eb..8f6960a 100644
 --- a/source/html/html-parse.c
 +++ b/source/html/html-parse.c
 @@ -63,6 +63,8 @@ static const char *html_default_css =
@@ -516,13 +556,13 @@ index de816eb..06d3d23 100644
  		return box;
  
  	// We have an inline element that is not in an existing flow/inline context.
-@@ -1092,6 +1094,33 @@ static fz_html_box *gen2_inline(fz_context *ctx, struct genstate *g, fz_html_box
+@@ -1092,6 +1094,31 @@ static fz_html_box *gen2_inline(fz_context *ctx, struct genstate *g, fz_html_box
  	return this_box;
  }
  
-+/* A <ruby> element is generated as an inline box holding its own flow list
-+ * (base text words followed by their <rt> annotation words), referenced from
-+ * the enclosing flow box by a single unbreakable FLOW_RUBY node. */
++/* Generate a <ruby> as an inline box holding its own flow list (base text
++ * then <rt> words), referenced from the enclosing flow by one unbreakable
++ * FLOW_RUBY node. */
 +static void gen2_ruby(fz_context *ctx, struct genstate *g, fz_html_box *root_box, fz_xml *node,
 +	fz_css_match *match, int display, fz_css_style *style)
 +{
@@ -536,13 +576,11 @@ index de816eb..06d3d23 100644
 +	this_box = new_box(ctx, g, node, BOX_RUBY, style);
 +	append_box(ctx, root_box, this_box);
 +
-+	/* Generate the ruby's contents (base text and <rt> annotations)
-+	 * into the ruby box's own flow list. */
++	/* Generate the ruby's contents into its own flow list. */
 +	gen2_children(ctx, g, this_box, node, match);
 +
-+	/* Add a single unbreakable flow node to the enclosing flow box
-+	 * (walk up from our parent, as the ruby box itself is a flow
-+	 * encloser for its own contents). */
++	/* Add one unbreakable flow node to the enclosing flow box (start from
++	 * our parent: the ruby box is a flow encloser for its own contents). */
 +	flow_box = find_flow_encloser(ctx, this_box->up);
 +	(void)add_flow(ctx, g->pool, flow_box, this_box, FLOW_RUBY, 0);
 +}
@@ -550,7 +588,7 @@ index de816eb..06d3d23 100644
  static void gen2_break(fz_context *ctx, struct genstate *g, fz_html_box *root_box, fz_xml *node)
  {
  	fz_html_box *this_box;
-@@ -1518,6 +1547,10 @@ static void gen2_children(fz_context *ctx, struct genstate *g, fz_html_box *root
+@@ -1518,6 +1545,10 @@ static void gen2_children(fz_context *ctx, struct genstate *g, fz_html_box *root
  			{
  				gen2_col(ctx, g, root_box, node, &match);
  			}
@@ -561,7 +599,7 @@ index de816eb..06d3d23 100644
  			else
  			{
  				gen2_tag(ctx, g, root_box, node, &match, display, &style);
-@@ -1711,7 +1744,8 @@ static void fragment_cb(const uint32_t *fragment,
+@@ -1711,7 +1742,8 @@ static void fragment_cb(const uint32_t *fragment,
  			len = 1;
  		}
  		else if (data->flow->type == FLOW_BREAK || data->flow->type == FLOW_SBREAK ||
@@ -571,7 +609,7 @@ index de816eb..06d3d23 100644
  		{
  			len = 0;
  		}
-@@ -2382,6 +2416,7 @@ fz_debug_html_flow(fz_context *ctx, fz_html_flow *flow, int level)
+@@ -2382,6 +2414,7 @@ fz_debug_html_flow(fz_context *ctx, fz_html_flow *flow, int level)
  		case FLOW_BREAK: printf("break"); break;
  		case FLOW_IMAGE: printf("image"); break;
  		case FLOW_ANCHOR: printf("anchor"); break;
@@ -579,7 +617,7 @@ index de816eb..06d3d23 100644
  		}
  		printf(" script=%d", flow->script);
  		// printf(" y=%g x=%g w=%g", flow->y, flow->x, flow->w);
-@@ -2455,6 +2490,7 @@ fz_debug_html_box(fz_context *ctx, fz_html_box *box, int level)
+@@ -2455,6 +2488,7 @@ fz_debug_html_box(fz_context *ctx, fz_html_box *box, int level)
  		case BOX_BLOCK: printf("block"); break;
  		case BOX_FLOW: printf("flow"); break;
  		case BOX_INLINE: printf("inline"); break;
@@ -587,7 +625,7 @@ index de816eb..06d3d23 100644
  		case BOX_TABLE: printf("table"); break;
  		case BOX_TABLE_ROW: printf("table-row"); break;
  		case BOX_TABLE_CELL: printf("table-cell"); break;
-@@ -2517,7 +2553,7 @@ fz_debug_html_box(fz_context *ctx, fz_html_box *box, int level)
+@@ -2517,7 +2551,7 @@ fz_debug_html_box(fz_context *ctx, fz_html_box *box, int level)
  
  		if (box->down)
  			fz_debug_html_box(ctx, box->down, level + 1);
